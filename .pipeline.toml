@@ -2,7 +2,10 @@
 command = "npm run build"
 output_directory = "dist"
 
-[publish.git]
-name = "test"
+[publish]
+
+[publish.git.test]
+name = ""
 branch = "test-b"
 repository = ""
+

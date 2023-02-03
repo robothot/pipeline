@@ -1,4 +1,4 @@
-use std::{error::Error, env, fs::{self}, process::{Command, Stdio}, sync::{mpsc::{self, Sender, Receiver}, Mutex}, io::BufRead, cell::RefCell};
+use std::{error::Error, env, fs::{self}, process::{Command, Stdio}, sync::{mpsc::{self, Sender, Receiver}, Mutex}, io::BufRead, cell::RefCell, collections::HashMap, fmt};
 
 use actix::{Actor, Context, Handler, Message };
 use actix_web::web::{self, Data};
@@ -15,8 +15,6 @@ struct PipelineTomlBuild {
 
 #[derive(Deserialize)]
 struct PipelineTomlPublishGit {
-    // 仓库名称
-    name: String,
     // 分支信息
     branch: String,
     // 仓库地址
@@ -25,7 +23,7 @@ struct PipelineTomlPublishGit {
 
 #[derive(Deserialize)]
 struct PipelineTomlPublish {
-    git: Vec<PipelineTomlPublishGit>
+    git: HashMap<String, PipelineTomlPublishGit>
 }
 
 #[derive(Deserialize)]
@@ -39,6 +37,18 @@ struct PipelineToml {
 pub struct RunPipeline {
     pub param: Value
 }
+
+#[derive(Debug)]
+struct PipelineError(String);
+
+
+impl fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Error for PipelineError {}
 
 pub struct PipelineActor {
     sender: Data<Sender<i64>>,
@@ -60,7 +70,7 @@ impl PipelineActor {
     fn run_build_script(param: Value, receiver: Data<Mutex<Receiver<i64>>>)-> Result<(), Box<dyn Error>>  {
         Self::run_pipeline_clone(&param)?;
 
-        let path = env::current_dir()?;
+        let path = env::current_dir()?.join(".cache");
         let project = param.get("project");
         let project_namespace = project.unwrap().get("namespace").unwrap().as_str().unwrap().to_string();
         let project_name = project.unwrap().get("name").unwrap().as_str().unwrap().to_string();
@@ -79,8 +89,6 @@ impl PipelineActor {
             .stdout(Stdio::piped())
             .spawn()?;
 
-
-
         let out = child.stdout.take().unwrap();
         
         let mut out = std::io::BufReader::new(out);
@@ -91,23 +99,24 @@ impl PipelineActor {
             }
            
             let receiver = receiver.try_lock().unwrap();
+       
+            if buffer.is_empty() == false {
+                info!("[{}] -> {}", &child.id(), buffer);
+                buffer.clear();
+            }
             if let Ok(msg) = receiver.try_recv() {
                 if msg.eq(&id) {
                     info!("task kill {}", &id);
                     child.kill()?;
-                    break;
+                    return Err(Box::new(PipelineError("kill".into())));
                 }
-            }
-            if buffer.is_empty() == false {
-                info!("[{}] -> {}", &child.id(), buffer);
-                buffer.clear();
             }
         }
         Ok(())
     }
 
     fn run_pipeline_clone(param: &Value) -> Result<(), Box<dyn Error>> {
-        let path = env::current_dir()?;
+        let path =env::current_dir()?.join(".cache");
         info!("current_dir -> {}", &path.display());
         let project = param.get("project");
         let project_namespace = project.unwrap().get("namespace").unwrap().as_str().unwrap().to_string();
@@ -124,7 +133,7 @@ impl PipelineActor {
             let child = Command::new("sh")
             .current_dir(&target_path)
             .arg("-c")
-            .arg(format!("git clone --depth 1 {} {}", &target_http_url, &project_namespace))
+            .arg(format!("git clone --depth 1 {} {}", &target_http_url, &project_name))
             .stdout(Stdio::piped())
             .spawn()?;
             child.wait_with_output()?;
@@ -161,12 +170,13 @@ impl Handler<RunPipeline> for PipelineActor{
         let mut run_task_lock = run_task_lock.borrow_mut();
         if run_task_lock.contains(&id) {
             sender.send(id).unwrap();
+
         }
         run_task_lock.push(id);
 
         let _ = web::block(move || {
 
-            let path = env::current_dir().unwrap();
+            let path = env::current_dir().unwrap().join(".cache");
             let project = param.get("project");
             let project_namespace = project.unwrap().get("namespace").unwrap().as_str().unwrap().to_string();
             let project_name = project.unwrap().get("name").unwrap().as_str().unwrap().to_string();
@@ -175,26 +185,39 @@ impl Handler<RunPipeline> for PipelineActor{
 
             match Self::run_build_script(msg.param.clone(), receiver.clone()) {
                 Ok(()) => {
+                    let run_task = run_task.try_lock().unwrap();
+                    let binding = run_task.clone();
+                    let mut run_task = binding.borrow_mut();
+                    let position = run_task.iter().position(|item| item.eq(&id));
+                    if let Some(position) = position {
+                        run_task.remove(position);
+                    }
+
 
                     let content = fs::read_to_string(target_path.join(".pipeline.toml")).unwrap();
                     let setting: PipelineToml  = toml::from_str(&content).unwrap();
                     
-                    for element in setting.publish.git {
-                        let name = element.name;
-                        let branch = element.branch;
-                        let repository = element.repository;
+                    for (name, item) in setting.publish.git.iter() {
 
+                        let output_directory = target_path.join(&setting.build.output_directory).join(".git");
+                        if  output_directory.exists() {
+                            std::fs::remove_dir_all(output_directory).unwrap();
+                        }
+
+                        let command = format!(
+                            "git init && git add . && git commit -am 'Rust Publish Static Files' && git checkout -b {} && git remote add {} {} && git push --force {} {} ",
+                            &item.branch,
+                            &name,
+                            &item.repository,
+                            &name,
+                            &item.branch,
+                        );
+
+                        info!("run command -> {} ", &command);
                         let child = Command::new("sh")
                         .current_dir(&target_path.join(&setting.build.output_directory))
                         .arg("-c")
-                        .arg(format!(
-                            "git init && git checkout {} && git remote add {} {} && git push --force {} {} ",
-                            &branch,
-                            &name,
-                            &repository,
-                            &name,
-                            &branch,
-                        ))
+                        .arg(command)
                         .stdout(Stdio::piped())
                         .spawn().unwrap();
                         child.wait_with_output().unwrap();
@@ -203,18 +226,17 @@ impl Handler<RunPipeline> for PipelineActor{
 
                 },
                 Err(err) => {
+                    let run_task = run_task.try_lock().unwrap();
+                    let binding = run_task.clone();
+                    let mut run_task = binding.borrow_mut();
+                    let position = run_task.iter().position(|item| item.eq(&id));
+                    if let Some(position) = position {
+                        run_task.remove(position);
+                    }
                     error!("ERR -> {}", err.to_string());
                 }
-            }
-            let run_task = run_task.try_lock().unwrap();
-            let binding = run_task.clone();
-            let mut run_task = binding.borrow_mut();
-            let position = run_task.iter().position(|item| item.eq(&id));
-            if let Some(position) = position {
-                run_task.remove(position);
-            }
+            } 
         });
-    
     }
 }
 
