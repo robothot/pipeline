@@ -1,0 +1,26 @@
+[package]
+name = "pipeline"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix = "0.13.0"
+actix-rt = "2.8.0"
+actix-web = "4.3.0"
+actix-web-actors = "4.2.0"
+env_logger = "0.10.0"
+log = "0.4.17"
+serde = { version = "1.0.152", features = ["derive"] }
+serde_json = "1.0.91"
+toml = "0.7.0"
+futures = "0.3"
+
+[dependencies.uuid]
+version = "1.2.2"
+features = [
+    "v4",               
+    "fast-rng",
+    "macro-diagnostics",
+]

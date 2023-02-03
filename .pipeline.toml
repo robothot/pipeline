@@ -1,0 +1,8 @@
+[build]
+command = "npm run build"
+output_directory = "dist"
+
+[publish.git]
+name = "test"
+branch = "test-b"
+repository = ""
