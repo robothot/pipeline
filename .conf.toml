@@ -1,3 +1,6 @@
+host = "127.0.0.1"
+port = 8080
+
 [gitlab]
 protocol = "http"
 host = "10.30.30.22"
