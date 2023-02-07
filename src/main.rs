@@ -1,5 +1,4 @@
 use std::{env, fs, collections::HashMap};
-
 use actix::Actor;
 use actix_web::{ App, HttpServer, web::{ Data } };
 use serde::Deserialize;
@@ -58,6 +57,12 @@ async fn main() -> std::io::Result<()> {
             .app_data(Data::new(setting.clone()))
             .app_data(Data::new(addr.clone()))
             .app_data(Data::new(gitlab.clone()))
+            // .service(
+            //     actix_files::Files::new("/", "./public")
+            //     .show_files_listing()
+            //     .index_file("index.html")
+            //     .use_last_modified(true)
+            // )
             .service(services::web_hooks::webhook_events)
     })
     .bind((host.as_str(), port))?

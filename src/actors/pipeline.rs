@@ -15,8 +15,13 @@ struct PipelineTomlBuild {
 
 #[derive(Deserialize)]
 struct PipelineTomlPublishGit {
+
+    // 设置环境变量指定 key GIT_SSH_COMMAND='ssh -i  ~/.ssh'
+    ssh_key: Option<String>,
+
     // 分支信息
     branch: String,
+
     // 仓库地址
     repository: String,
 }
@@ -203,14 +208,30 @@ impl Handler<RunPipeline> for PipelineActor{
                             std::fs::remove_dir_all(output_directory).unwrap();
                         }
 
-                        let command = format!(
-                            "git init && git add . && git commit -am 'Rust Publish Static Files' && git checkout -b {} && git remote add {} {} && git push --force {} {} ",
-                            &item.branch,
-                            &name,
-                            &item.repository,
-                            &name,
-                            &item.branch,
-                        );
+                        let command = match &item.ssh_key  {
+                            Some(git_ssh_command) => {
+                                format!(
+                                    "GIT_SSH_COMMAND='ssh -i {}' && git init && git add . && git commit -am 'Rust Publish Static Files' && git checkout -b {} && git remote add {} {} && git push --force {} {} ",
+                                    git_ssh_command,
+                                    &item.branch,
+                                    &name,
+                                    &item.repository,
+                                    &name,
+                                    &item.branch,
+                                )
+                            },
+                            None => {
+                                format!(
+                                    "git init && git add . && git commit -am 'Rust Publish Static Files' && git checkout -b {} && git remote add {} {} && git push --force {} {} ",
+                                    &item.branch,
+                                    &name,
+                                    &item.repository,
+                                    &name,
+                                    &item.branch,
+                                )
+                            }
+                        };
+
 
                         info!("run command -> {} ", &command);
                         let child = Command::new("sh")
