@@ -193,7 +193,6 @@ impl Handler<RunPipeline> for PipelineActor{
                         run_task.remove(position);
                     }
 
-
                     let content = fs::read_to_string(target_path.join(".pipeline.toml")).unwrap();
                     let setting: PipelineToml  = toml::from_str(&content).unwrap();
                     
@@ -222,8 +221,6 @@ impl Handler<RunPipeline> for PipelineActor{
                         .spawn().unwrap();
                         child.wait_with_output().unwrap();
                     }
-                    
-
                 },
                 Err(err) => {
                     let run_task = run_task.try_lock().unwrap();

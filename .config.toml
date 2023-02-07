@@ -1,0 +1,12 @@
+[gitlab]
+protocol = "http"
+host = "10.30.30.22"
+token = "xxxxxxx"
+
+[gitlab.project]
+
+[gitlab.project.11]
+branch = "master"
+merge_request = [
+    "quick://merge"
+]

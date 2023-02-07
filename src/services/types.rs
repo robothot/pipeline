@@ -13,7 +13,6 @@ pub struct Reply {
     pub state: StateEnum,
     pub data: Option<Value>,
     pub hint: String
-
 }
 
 impl Responder for Reply {
