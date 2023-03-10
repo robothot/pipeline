@@ -7,23 +7,14 @@ edition = "2021"
 
 [dependencies]
 actix = "0.13.0"
-actix-files = "0.6.2"
+actix-rt = "2.8.0"
 actix-web = "4.3.0"
 actix-web-actors = "4.2.0"
 chrono = "0.4.23"
 cron = "0.12.0"
 env_logger = "0.10.0"
-gitlab = "0.1508.0"
 log = "0.4.17"
+reqwest = { version = "0.11.14", features = ["rustls-tls"], default-features = false }
 serde = { version = "1.0.152", features = ["derive"] }
 serde_json = "1.0.91"
-tokio = "1.25.0"
 toml = "0.7.0"
-
-[dependencies.uuid]
-version = "1.2.2"
-features = [
-    "v4",               
-    "fast-rng",
-    "macro-diagnostics",
-]

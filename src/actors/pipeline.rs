@@ -56,14 +56,14 @@ impl fmt::Display for PipelineError {
 impl Error for PipelineError {}
 
 pub struct PipelineActor {
-    sender: Data<Sender<i64>>,
-    receiver: Data<Mutex<Receiver<i64>>>,
-    run_task: Data<Mutex<RefCell<Vec<i64>>>>,
+    sender: Data<Sender<String>>,
+    receiver: Data<Mutex<Receiver<String>>>,
+    run_task: Data<Mutex<RefCell<Vec<String>>>>,
 }
 
 impl PipelineActor {
     pub fn new() -> PipelineActor {
-        let (tx, rx) = mpsc::channel::<i64>();
+        let (tx, rx) = mpsc::channel::<String>();
         
         PipelineActor {
             sender: Data::new(tx),
@@ -72,7 +72,7 @@ impl PipelineActor {
         }
     }
 
-    fn run_build_script(param: Value, receiver: Data<Mutex<Receiver<i64>>>)-> Result<(), Box<dyn Error>>  {
+    fn run_build_script(param: Value, receiver: Data<Mutex<Receiver<String>>>)-> Result<(), Box<dyn Error>>  {
         Self::run_pipeline_clone(&param)?;
 
         let path = env::current_dir()?.join(".cache");
@@ -81,10 +81,15 @@ impl PipelineActor {
         let project_name = project.unwrap().get("name").unwrap().as_str().unwrap().to_string();
         let object_attributes = param.get("object_attributes");
         let id = object_attributes.unwrap().get("id").unwrap().as_i64().unwrap();
-        let target_path = &path.join(&project_namespace).join(&project_name);
+        let target_branch = object_attributes.unwrap().get("target_branch").unwrap().as_str().unwrap();
+      
+        let target_path = &path.join(&project_namespace).join(&project_name).join(&target_branch);
         let content = fs::read_to_string(target_path.join(".pipeline.toml"))?;
         let setting: PipelineToml  = toml::from_str(&content)?;
         let command = setting.build.command;
+
+        let target_branch_id = object_attributes.unwrap().get("target_branch_id").unwrap().as_u64().unwrap();
+        let project_id = project.unwrap().get("id").unwrap().as_u64().unwrap();
 
         info!("run command -> {} ", &command);
         let mut child = Command::new("sh")
@@ -110,7 +115,8 @@ impl PipelineActor {
                 buffer.clear();
             }
             if let Ok(msg) = receiver.try_recv() {
-                if msg.eq(&id) {
+                let ids = format!("{}/{}", project_id, target_branch_id);
+                if msg.eq(&ids) {
                     info!("task kill {}", &id);
                     child.kill()?;
                     return Err(Box::new(PipelineError("kill".into())));
@@ -122,30 +128,27 @@ impl PipelineActor {
 
     fn run_pipeline_clone(param: &Value) -> Result<(), Box<dyn Error>> {
         let path =env::current_dir()?.join(".cache");
-        info!("current_dir -> {}", &path.display());
         let project = param.get("project");
         let project_namespace = project.unwrap().get("namespace").unwrap().as_str().unwrap().to_string();
         let project_name = project.unwrap().get("name").unwrap().as_str().unwrap().to_string();
         let object_attributes = param.get("object_attributes");
     
         let target = object_attributes.unwrap().get("target").unwrap();
+        let target_branch = object_attributes.unwrap().get("target_branch").unwrap().as_str().unwrap();
         let target_http_url = target.get("git_http_url").clone().unwrap().as_str().unwrap().to_string();
-        if path.join(&project_namespace).join(&project_name).exists() == false {
-            if path.join(&project_namespace).exists() == false {
-                fs::create_dir_all(path.join(&project_namespace).join(&project_name))?;
-            }
-            let target_path = &path.join(&project_namespace);
+        let dir = path.join(&project_namespace).join(&project_name);
+        if dir.join(target_branch).exists() == false {
+            fs::create_dir_all(&dir)?;
             let child = Command::new("sh")
-            .current_dir(&target_path)
+            .current_dir(&dir)
             .arg("-c")
-            .arg(format!("git clone --depth 1 {} {}", &target_http_url, &project_name))
+            .arg(format!("git clone -b {} --depth 1 {} {}", &target_branch, &target_http_url, &target_branch))
             .stdout(Stdio::piped())
             .spawn()?;
             child.wait_with_output()?;
         } else {
-            let target_path = &path.join(&project_namespace).join(&project_name);
             let child = Command::new("sh")
-            .current_dir(&target_path)
+            .current_dir(&dir.join(target_branch))
             .arg("-c")
             .arg(format!("git pull "))
             .stdout(Stdio::piped())
@@ -167,17 +170,22 @@ impl Handler<RunPipeline> for PipelineActor{
         let sender = self.sender.clone();
         let param = msg.param.clone();
         let object_attributes = param.get("object_attributes");
-        let id = object_attributes.unwrap().get("id").unwrap().as_i64().unwrap();
-        
+        let target_branch = object_attributes.unwrap().get("target_branch").unwrap().as_str().unwrap().to_string();
         let run_task = self.run_task.clone();
-        let run_task_lock = run_task.clone();
-        let run_task_lock = run_task_lock.try_lock().unwrap();
-        let mut run_task_lock = run_task_lock.borrow_mut();
-        if run_task_lock.contains(&id) {
-            sender.send(id).unwrap();
+        let target_branch_id = object_attributes.unwrap().get("target_branch_id").unwrap().as_u64().unwrap();
+        let project = param.get("project");
+        let project_id = project.unwrap().get("id").unwrap().as_u64().unwrap();
+        let ids = format!("{}/{}", project_id, target_branch_id);
+        {
+            let run_task_lock = run_task.clone();
+            let run_task_lock = run_task_lock.lock().unwrap();
+            let mut run_task_lock = run_task_lock.borrow_mut();
 
+            if run_task_lock.contains(&ids) {
+                sender.send(ids.clone()).unwrap();
+            }
+            run_task_lock.push(ids.clone());
         }
-        run_task_lock.push(id);
 
         let _ = web::block(move || {
 
@@ -185,19 +193,19 @@ impl Handler<RunPipeline> for PipelineActor{
             let project = param.get("project");
             let project_namespace = project.unwrap().get("namespace").unwrap().as_str().unwrap().to_string();
             let project_name = project.unwrap().get("name").unwrap().as_str().unwrap().to_string();
-            let target_path = &path.join(&project_namespace).join(&project_name);
-    
+            let target_path = &path.join(&project_namespace).join(&project_name).join(&target_branch);
 
             match Self::run_build_script(msg.param.clone(), receiver.clone()) {
                 Ok(()) => {
-                    let run_task = run_task.try_lock().unwrap();
-                    let binding = run_task.clone();
-                    let mut run_task = binding.borrow_mut();
-                    let position = run_task.iter().position(|item| item.eq(&id));
-                    if let Some(position) = position {
-                        run_task.remove(position);
+                    {
+                        let run_task = run_task.lock().unwrap();
+                        let binding = run_task.clone();
+                        let mut run_task = binding.borrow_mut();
+                        let position = run_task.iter().position(|item| item.eq(&ids));
+                        if let Some(position) = position {
+                            run_task.remove(position);
+                        }
                     }
-
                     let content = fs::read_to_string(target_path.join(".pipeline.toml")).unwrap();
                     let setting: PipelineToml  = toml::from_str(&content).unwrap();
                     
@@ -208,30 +216,35 @@ impl Handler<RunPipeline> for PipelineActor{
                             std::fs::remove_dir_all(output_directory).unwrap();
                         }
 
+                        let mut new_branch_name = item.branch.clone();
+
+                        if new_branch_name.eq("$auto_branch") {
+                            new_branch_name = format!("RCD_{}", target_branch);
+                        }
+
                         let command = match &item.ssh_key  {
                             Some(git_ssh_command) => {
                                 format!(
                                     "GIT_SSH_COMMAND='ssh -i {}' && git init && git add . && git commit -am 'Rust Publish Static Files' && git checkout -b {} && git remote add {} {} && git push --force {} {} ",
                                     git_ssh_command,
-                                    &item.branch,
+                                    &new_branch_name,
                                     &name,
                                     &item.repository,
                                     &name,
-                                    &item.branch,
+                                    &new_branch_name,
                                 )
                             },
                             None => {
                                 format!(
                                     "git init && git add . && git commit -am 'Rust Publish Static Files' && git checkout -b {} && git remote add {} {} && git push --force {} {} ",
-                                    &item.branch,
+                                    &new_branch_name,
                                     &name,
                                     &item.repository,
                                     &name,
-                                    &item.branch,
+                                    &new_branch_name,
                                 )
                             }
                         };
-
 
                         info!("run command -> {} ", &command);
                         let child = Command::new("sh")
@@ -244,10 +257,10 @@ impl Handler<RunPipeline> for PipelineActor{
                     }
                 },
                 Err(err) => {
-                    let run_task = run_task.try_lock().unwrap();
+                    let run_task = run_task.lock().unwrap();
                     let binding = run_task.clone();
                     let mut run_task = binding.borrow_mut();
-                    let position = run_task.iter().position(|item| item.eq(&id));
+                    let position = run_task.iter().position(|item| item.eq(&ids));
                     if let Some(position) = position {
                         run_task.remove(position);
                     }

@@ -11,5 +11,5 @@ token = "xxxxxxx"
 [gitlab.project.11]
 branch = "master"
 merge_request = [
-    "quick://merge"
+    "cron://develop/ 0 30 11,17 ? * MON,TUE,WED,THU,FRI *"
 ]
