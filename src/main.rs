@@ -44,8 +44,8 @@ pub struct ConfigToml {
 async fn main() -> std::io::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     env_logger::init();
-    info!("version       : 0.0.12");
-    info!("release time  : 2023-03-09 10:12");
+    info!("version       : 0.0.15");
+    info!("release time  : 2023-04-6 10:29");
     let path = env::current_dir()?;
 
     let content = fs::read_to_string(path.join(".conf.toml"))?;
@@ -84,10 +84,10 @@ async fn main() -> std::io::Result<()> {
                     if let Some(datetime) = upcoming.next() {
                         if datetime.timestamp() <= local.timestamp() {
                             let _ = gitlab::mr::create(
-                                element[0].clone(),
-                                element[1].clone(),
-                                element[2].clone(),
-                                "[RUST-ROBOT]: 自动发版".to_string()
+                                element[0].clone().as_str(),
+                                element[1].clone().as_str(),
+                                element[2].clone().as_str(),
+                                "[RUST-ROBOT]: 自动发版"
                             ).await;
                         }
                     }

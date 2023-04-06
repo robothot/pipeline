@@ -1,8 +1,8 @@
-use std::{error::Error, env, fs::{self}, process::{Command, Stdio}, sync::{mpsc::{self, Sender, Receiver}, Mutex}, io::BufRead, cell::RefCell, collections::HashMap, fmt};
+use std::{error::Error, env, fs::{self}, process::{Command, Stdio}, io::BufRead, collections::HashMap, fmt, sync::Mutex, cell::{RefCell, RefMut}};
 
 use actix::{Actor, Context, Handler, Message };
 use actix_web::web::{self, Data};
-use log::{info, error};
+use log::{info};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -56,40 +56,33 @@ impl fmt::Display for PipelineError {
 impl Error for PipelineError {}
 
 pub struct PipelineActor {
-    sender: Data<Sender<String>>,
-    receiver: Data<Mutex<Receiver<String>>>,
-    run_task: Data<Mutex<RefCell<Vec<String>>>>,
+    pids: Data<Mutex<HashMap<String, String>>>
 }
 
 impl PipelineActor {
     pub fn new() -> PipelineActor {
-        let (tx, rx) = mpsc::channel::<String>();
-        
         PipelineActor {
-            sender: Data::new(tx),
-            receiver: Data::new(Mutex::new(rx)),
-            run_task: Data::new(Mutex::new(RefCell::new(vec![])))
+            pids: Data::new(Mutex::new(HashMap::new()))
         }
     }
 
-    fn run_build_script(param: Value, receiver: Data<Mutex<Receiver<String>>>)-> Result<(), Box<dyn Error>>  {
-        Self::run_pipeline_clone(&param)?;
 
+    fn run_build_script(param: Value, pids: Data<Mutex<HashMap<String, String>>>)-> Result<(), Box<dyn Error>>  {
+        Self::run_pipeline_clone(&param)?;
         let path = env::current_dir()?.join(".cache");
         let project = param.get("project");
         let project_namespace = project.unwrap().get("namespace").unwrap().as_str().unwrap().to_string();
         let project_name = project.unwrap().get("name").unwrap().as_str().unwrap().to_string();
         let object_attributes = param.get("object_attributes");
-        let id = object_attributes.unwrap().get("id").unwrap().as_i64().unwrap();
         let target_branch = object_attributes.unwrap().get("target_branch").unwrap().as_str().unwrap();
-      
+        let project_id = project.unwrap().get("id").unwrap().as_u64().unwrap();
         let target_path = &path.join(&project_namespace).join(&project_name).join(&target_branch);
         let content = fs::read_to_string(target_path.join(".pipeline.toml"))?;
         let setting: PipelineToml  = toml::from_str(&content)?;
         let command = setting.build.command;
 
-        let target_branch_id = object_attributes.unwrap().get("target_branch_id").unwrap().as_u64().unwrap();
-        let project_id = project.unwrap().get("id").unwrap().as_u64().unwrap();
+        let task_id = format!("{}/{}", project_id, target_branch);
+
 
         info!("run command -> {} ", &command);
         let mut child = Command::new("sh")
@@ -99,6 +92,11 @@ impl PipelineActor {
             .stdout(Stdio::piped())
             .spawn()?;
 
+        {
+            let mut pids = pids.lock().unwrap();
+            pids.insert(task_id.clone(), child.id().to_string());
+
+        }
         let out = child.stdout.take().unwrap();
         
         let mut out = std::io::BufReader::new(out);
@@ -107,21 +105,14 @@ impl PipelineActor {
             if let Ok(Some(_)) = child.try_wait() {
                 break;
             }
-           
-            let receiver = receiver.try_lock().unwrap();
-       
             if buffer.is_empty() == false {
                 info!("[{}] -> {}", &child.id(), buffer);
                 buffer.clear();
             }
-            if let Ok(msg) = receiver.try_recv() {
-                let ids = format!("{}/{}", project_id, target_branch_id);
-                if msg.eq(&ids) {
-                    info!("task kill {}", &id);
-                    child.kill()?;
-                    return Err(Box::new(PipelineError("kill".into())));
-                }
-            }
+        }
+        {
+            let mut pids = pids.lock().unwrap();
+            pids.remove(&task_id);
         }
         Ok(())
     }
@@ -166,56 +157,45 @@ impl Actor for PipelineActor {
 impl Handler<RunPipeline> for PipelineActor{
     type Result = ();
     fn handle(&mut self, msg: RunPipeline, _: &mut Self::Context) {
-        let receiver =  self.receiver.clone();
-        let sender = self.sender.clone();
         let param = msg.param.clone();
         let object_attributes = param.get("object_attributes");
         let target_branch = object_attributes.unwrap().get("target_branch").unwrap().as_str().unwrap().to_string();
-        let run_task = self.run_task.clone();
-        let target_branch_id = object_attributes.unwrap().get("target_branch_id").unwrap().as_u64().unwrap();
         let project = param.get("project");
         let project_id = project.unwrap().get("id").unwrap().as_u64().unwrap();
-        let ids = format!("{}/{}", project_id, target_branch_id);
-        {
-            let run_task_lock = run_task.clone();
-            let run_task_lock = run_task_lock.lock().unwrap();
-            let mut run_task_lock = run_task_lock.borrow_mut();
+        let task_id = format!("{}/{}", project_id, target_branch);
+        let pids = self.pids.clone();
 
-            if run_task_lock.contains(&ids) {
-                sender.send(ids.clone()).unwrap();
+        {
+            let mut pids = pids.lock().unwrap();
+            if pids.contains_key(&task_id) {
+                let id = pids.get(&task_id).unwrap().clone();
+                let child = Command::new("sh")
+                .arg("-c")
+                .arg(format!("kill -9 {}", id))
+                .stdout(Stdio::piped())
+                .spawn().unwrap();
+                child.wait_with_output().unwrap();
+                pids.remove(&task_id);
             }
-            run_task_lock.push(ids.clone());
         }
 
         let _ = web::block(move || {
-
             let path = env::current_dir().unwrap().join(".cache");
             let project = param.get("project");
             let project_namespace = project.unwrap().get("namespace").unwrap().as_str().unwrap().to_string();
             let project_name = project.unwrap().get("name").unwrap().as_str().unwrap().to_string();
             let target_path = &path.join(&project_namespace).join(&project_name).join(&target_branch);
 
-            match Self::run_build_script(msg.param.clone(), receiver.clone()) {
+            match Self::run_build_script(msg.param.clone(), pids) {
                 Ok(()) => {
-                    {
-                        let run_task = run_task.lock().unwrap();
-                        let binding = run_task.clone();
-                        let mut run_task = binding.borrow_mut();
-                        let position = run_task.iter().position(|item| item.eq(&ids));
-                        if let Some(position) = position {
-                            run_task.remove(position);
-                        }
-                    }
                     let content = fs::read_to_string(target_path.join(".pipeline.toml")).unwrap();
                     let setting: PipelineToml  = toml::from_str(&content).unwrap();
-                    
                     for (name, item) in setting.publish.git.iter() {
 
-                        let output_directory = target_path.join(&setting.build.output_directory).join(".git");
-                        if  output_directory.exists() {
-                            std::fs::remove_dir_all(output_directory).unwrap();
-                        }
-
+                        // let output_directory = target_path.join(&setting.build.output_directory).join(".git");
+                        // if  output_directory.exists() {
+                        //     std::fs::remove_dir_all(output_directory).unwrap();
+                        // }
                         let mut new_branch_name = item.branch.clone();
 
                         if new_branch_name.eq("$auto_branch") {
@@ -252,21 +232,13 @@ impl Handler<RunPipeline> for PipelineActor{
                         .arg("-c")
                         .arg(command)
                         .stdout(Stdio::piped())
-                        .spawn().unwrap();
+                        .spawn().expect("run task error");
                         child.wait_with_output().unwrap();
                     }
                 },
-                Err(err) => {
-                    let run_task = run_task.lock().unwrap();
-                    let binding = run_task.clone();
-                    let mut run_task = binding.borrow_mut();
-                    let position = run_task.iter().position(|item| item.eq(&ids));
-                    if let Some(position) = position {
-                        run_task.remove(position);
-                    }
-                    error!("ERR -> {}", err.to_string());
+                Err(_) => {
                 }
-            } 
+            }
         });
     }
 }
